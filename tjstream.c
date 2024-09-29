@@ -26,170 +26,10 @@ long seconds, useconds;
 double total_time;
 
 int loglevel=0;
-int fb_stat(int fd, int *width, int *height, int *depth, int yoffset)
-{
-	//FBIOGET_FSCREENINFO和FBIOGET_VSCREENINFO。前者返回与Framebuffer有关的固定的信息，比如图形硬件上实际的帧缓存空间的大小、能否硬件加速等信息。而后者返回的是与Framebuffer有关的可变信息。
-	struct fb_fix_screeninfo fb_finfo;
-	struct fb_var_screeninfo fb_vinfo;
-	if (ioctl(fd, FBIOGET_FSCREENINFO, &fb_finfo)) {//返回framebuffer物理信息
-		perror(__func__);
-		return (-1);
-	}
-	// Get the screen dimensions
-	if (ioctl(fd, FBIOGET_VSCREENINFO, &fb_vinfo)) {
-		fprintf(stderr, "Error reading variable information");
-		perror(__func__);
-		return (-1);
-	}
 
-	if(fb_vinfo.bits_per_pixel != 24
-	  && fb_vinfo.bits_per_pixel != 16){
-		fprintf(stderr, "bpp %d not support!",fb_vinfo.bits_per_pixel);
-		return (-1);
-	}
-
-	*width = fb_vinfo.xres;//宽度
-	*height = fb_vinfo.yres;//高度
-	*depth = fb_vinfo.bits_per_pixel;//var.bits_per_pixel为16每像素二进制位数
-
-	if (loglevel) fprintf(stdout, "%s: vyres %d vxres %d\n",__func__, fb_vinfo.yres_virtual, fb_vinfo.xres_virtual);
-	if (loglevel) fprintf(stdout, "%s: off(r/g/b) %d/%d/%d\n",__func__, fb_vinfo.red.offset, fb_vinfo.green.offset, fb_vinfo.blue.offset);
-	if(yoffset<0) {
-		return (0);
-	}
-	fb_vinfo.yoffset = yoffset;
-	//返回framebuffer可变信息
-	if (ioctl(fd, FBIOPAN_DISPLAY, &fb_vinfo)) {
-		perror(__func__);
-		return (-1);
-	}
-	if (ioctl(fd, FBIOGET_VSCREENINFO, &fb_vinfo)) {
-		perror(__func__);
-		return (-1);
-	}
-
-	if (loglevel) fprintf(stdout, "%s: yoff %d\n",__func__, fb_vinfo.yoffset);
-	return (0);
-}
-
-//映射内存
-void *fb_mmap(int fd, unsigned int screensize)
-{
-	caddr_t fbmem;
-	//映射内存缓冲区
-	fbmem = mmap(0, screensize, PROT_READ | PROT_WRITE,MAP_SHARED, fd, 0);
-	if (fbmem == MAP_FAILED) {
-		perror(__func__);
-		return NULL;
-	}
-	return (fbmem);//返回缓冲区指针
-}
-//释放framebuffer内存
-int fb_munmap(void *start, size_t length)
-{
-	if(start) return (munmap(start, length));
-	return 0;
-}
-
-unsigned short RGB888toRGB565(unsigned char red, unsigned char green, unsigned char blue)
-{
-	unsigned short B = (blue >> 3) & 0x001F;//取高5位
-	unsigned short G = ((green >> 2) << 5) & 0x07E0;//取高6位，并移动位置
-	unsigned short R = ((red >> 3) << 11) & 0xF800;//取高5位并移动位置
-	return (unsigned short) (R | G | B);//合并为16的像素数据
-}
-
-
-void* create_fb_img(int *fbfd_out, int *screen_size)
-{
-	unsigned char *fbmem = NULL;
-	int width, height, depth, yoff=-1;
-	int screensize;
-
-	// Open the frame buffer device
-	int fbfd = open("/dev/fb0", O_RDWR);
-	if (fbfd < 0) {
-		perror("Error opening frame buffer device");
-		return NULL;
-	}
-
-	fb_stat(fbfd, &width, &height, &depth, yoff);
-	fprintf(stdout, "fb width: %d height: %d depth: %d\n", width, height, depth);
-	screensize = width * height * depth / 8 * 2;
-	//映射LCD内存
-	fbmem = fb_mmap(fbfd, screensize);
-	*screen_size= screensize;
-
-	*fbfd_out = fbfd;
-	return fbmem;
-}
-int destory_fb_image(void* fbmem, int screensize, int fbfd)
-{
-	fb_munmap(fbmem, screensize);
-	close(fbfd);
-	return 0;
-}
-
-static inline void flush_fb_image(void* data, void* fbmem, long size)
-{
-	memcpy((unsigned char *) fbmem , data, size);
-}
-
-#define _throw(action, message) { \
-	fprintf(stderr, "ERROR in line %d while %s:\n%s\n", __LINE__, action, message); \
-	goto bailout; \
-}
-#define _throwtj(action)  _throw(action, tjGetErrorStr2(tjInstance))
-
-const char *subsampName[TJ_NUMSAMP] = {
-  "4:4:4", "4:2:2", "4:2:0", "Grayscale", "4:4:0", "4:1:1"
-};
-
-const char *colorspaceName[TJ_NUMCS] = {
-  "RGB", "YCbCr", "GRAY", "CMYK", "YCCK"
-};
-
-long decode_jpeg_by_cpu(unsigned char *jpegBuf, unsigned long jpegSize,
-			unsigned char *imgBuf, unsigned long imgSize)
-{
-	tjhandle tjInstance = NULL;
-	int width, height;
-	int inSubsamp, inColorspace;
-	int pixelFormat = TJPF_BGR;
-	int flags = 0;
-	long size = 0;
-
-	// 创建一个TurboJPEG解码器实例
-	if ((tjInstance = tjInitDecompress()) == NULL)
-		_throwtj("initializing compressor");
-	if (tjDecompressHeader3(tjInstance, jpegBuf, jpegSize, &width, &height,
-                            &inSubsamp, &inColorspace) < 0)
-		_throwtj("reading JPEG header");
-
-	if (loglevel) fprintf(stdout, "%s Image:  %d x %d pixels, %s subsampling, %s colorspace\n",
-		   "Input", width, height,
-		   subsampName[inSubsamp], colorspaceName[inColorspace]);
-
-	size = width * height * tjPixelSize[pixelFormat];
-	if( size > imgSize)
-		_throwtj("allocating uncompressed image buffer");
-	//printf("Using fast upsampling code\n");
-	//flags |= TJFLAG_FASTUPSAMPLE;
-	//printf("Using fastest DCT/IDCT algorithm\n");
-	flags |= TJFLAG_FASTDCT;
-	//printf("Using most accurate DCT/IDCT algorithm\n");
-	//flags |= TJFLAG_ACCURATEDCT;
-	pixelFormat = TJPF_BGR;
-	if (tjDecompress2(tjInstance, jpegBuf, jpegSize,
-				imgBuf,
-				width, 0, height,
-				pixelFormat, flags) < 0)
-		_throwtj("decompressing JPEG image");
-
-bailout:
-	if (tjInstance) tjDestroy(tjInstance);
-	return size;
-}
+static void ev_msg_cb(int fd, short events, void*arg);
+static void bev_read_msg_cb(struct bufferevent *bev, void *arg);
+static void bev_cb(struct bufferevent* bev, short event, void *arg);
 
 void msleep(long nsec)
 {
@@ -199,91 +39,14 @@ void msleep(long nsec)
     nanosleep(&ts, NULL);
 }
 
-
-int prepare_jpg_image(char* name, unsigned char* jpegBuf, int bufSize)
-{
-	FILE *jpegFile = NULL;
-	long size;
-	unsigned long jpegSize = 0;
-
-	/* Read the JPEG file into memory. */
-	if ((jpegFile = fopen(name, "rb")) == NULL) {
-		fprintf(stderr, "opening input file %s", name);
-		goto bailout;
-	}
-	if (fseek(jpegFile, 0, SEEK_END) < 0
-		|| ((size = ftell(jpegFile)) < 0)
-		|| fseek(jpegFile, 0, SEEK_SET) < 0) {
-		fprintf(stderr, "determining input file size");
-		goto bailout;
-	}
-	if (size == 0) {
-		fprintf(stderr, "determining input file size, Input file contains no data");
-		goto bailout;
-	}
-	jpegSize = (unsigned long)size;
-
-	if(jpegBuf == NULL || bufSize < jpegSize) {
-		fprintf(stderr, "jpegBuf %p or alloc size too samll %d(%ld)",
-				jpegBuf, bufSize, jpegSize);
-		goto bailout;
-	}
-	if (fread(jpegBuf, jpegSize, 1, jpegFile) < 1) {
-		fprintf(stderr, "reading input file");
-		goto bailout;
-	}
-	if (jpegFile) fclose(jpegFile);
-
-bailout:
-	return jpegSize;
-}
-
-void test_decode(char* name)
-{
-	unsigned long jpegSize;
-	unsigned char *jpegBuf = NULL;
-	unsigned char *imgBuf = NULL;
-	unsigned char *fbmem = NULL;
-	int fbfd = 0;
-	int frames=203;
-	int i, szjpegBuf, szimgBuf;
-	int screensize;
-
-	char name_array[64] = {0};
-
-	szjpegBuf= 500*1024;
-	szimgBuf= 1024 * 600 * 4;
-	if ((jpegBuf = (unsigned char *)tjAlloc(szjpegBuf)) == NULL) {
-		fprintf(stderr, "allocating JPEG buffer");
-		goto bailout;
-	}
-	if ((imgBuf = (unsigned char *)tjAlloc(szimgBuf)) == NULL) {
-		fprintf(stderr, "allocating uncompressed image buffer");
-		goto bailout;
-	}
-	fbmem = create_fb_img(&fbfd, &screensize);
-	for (i = 0; i < frames; i++) {
-		memset(name_array,0, sizeof(name_array));
-		sprintf(name_array,"%s/output-%03d.jpg", name, i+1);
-		jpegSize = prepare_jpg_image(name_array, jpegBuf, szjpegBuf);
-		decode_jpeg_by_cpu(jpegBuf, jpegSize, imgBuf, szimgBuf);
-		flush_fb_image(imgBuf, fbmem, 1024 * 600 *3);
-
-		msleep(8000000);
-	}
-bailout:
-	destory_fb_image(fbmem, screensize, fbfd);
-	if (imgBuf) tjFree(imgBuf);
-	if (jpegBuf) tjFree(jpegBuf);
-}
-
 /********************************************************
  *
+ * Display & UI layer
  *
  ********************************************************/
 int fb_ui_init(struct tiny_jpeg_stream_info *info)
 {
-	printf("%s need implment!\n", __func__);
+	tjs_warn("%s need implment!\n", __func__);
 	return 0;
 }
 
@@ -316,6 +79,7 @@ int tjs_fb_init(struct tiny_jpeg_stream_info * info)
 	info->fb_yoff = yoff;
 	return 0;
 }
+
 int tjs_fb_deinit(struct tiny_jpeg_stream_info * info)
 {
 	fb_munmap(info->fbmem, info->screensize);
@@ -323,13 +87,24 @@ int tjs_fb_deinit(struct tiny_jpeg_stream_info * info)
 	return 0;
 }
 
+/********************************************************
+ *
+ * JPEG Codec
+ *
+ ********************************************************/
+int tjs_decode_deinit(struct tiny_jpeg_stream_info * info)
+{
+	if (info->imgBuf) tjFree(info->imgBuf);
+	if (info->jpegBuf) tjFree(info->jpegBuf);
+	return 0;
+}
 int tjs_decode_init(struct tiny_jpeg_stream_info * info)
 {
 	unsigned char *jpegBuf = NULL;
 	unsigned char *imgBuf = NULL;
 
 	/* decoded jpeg buffer size */
-	info->szjpegBuf = 500*1024; 
+	info->szjpegBuf = 500*1024;
 	/**/
 	info->j_width = 1024;
 	info->j_height = 600;
@@ -356,9 +131,9 @@ bailout:
 
 int wait_image_ready(struct tiny_jpeg_stream_mgr *mgr, int timeout)
 {
-	printf(PREFIX"%s\n", __func__);
+	tjs_msg(PREFIX"%s\n", __func__);
 	pthread_mutex_lock(&mgr->lock);
-	printf(PREFIX"%s get data\n", __func__);
+	tjs_msg(PREFIX"%s get data\n", __func__);
 	return 0;
 }
 
@@ -370,16 +145,16 @@ int set_image_done(struct tiny_jpeg_stream_mgr *mgr)
 
 int tjs_get_image(unsigned char* jpegBuf, int bufSize, unsigned long *jpegSize)
 {
-	printf("%s need implment!\n", __func__);
+	tjs_warn("%s need implment!\n", __func__);
 	return 0;
 }
-void* tjs_process(void *arg)
+
+void* tjs_process_thread(void *arg)
 {
 	struct tiny_jpeg_stream_mgr *mgr = (struct tiny_jpeg_stream_mgr *)arg;
 	struct tiny_jpeg_stream_info *info = &mgr->info;
 	struct tiny_jpeg_stream_param *param = info->param;
-	int ret;
-
+	int ret = 0 ;
 
 	/* one frame timeout=1000/fps */
 	int timeout_usec = (1000 * 1000 ) / param->fps;
@@ -390,6 +165,7 @@ void* tjs_process(void *arg)
 		ret = wait_image_ready(mgr, timeout_usec);
 		if (ret)
 			continue;
+		//dump_hex(info->jpegBuf+info->jpegSize - 1024 ,1024);
 		ret = tjs_get_image(info->jpegBuf,info->szjpegBuf, &info->jpegSize);
 		if (!ret) {
 			decode_jpeg_by_cpu(info->jpegBuf,
@@ -398,29 +174,10 @@ void* tjs_process(void *arg)
 					info->szimgBuf);
 			flush_fb_image(info->imgBuf, info->fbmem, szimage);
 		}
-		set_image_done(mgr);
+		//set_image_done(mgr);
 	}
 	/**/
 	return mgr;
-}
-int tjstream_init_param(struct tiny_jpeg_stream_param *param)
-{
-	/* net configuration */
-	strcpy(param->ip,"0.0.0.0");
-	param->port = 8923;
-	param->fps = 20;
-
-	/* JPEG configuration */
-	param->jfmt = TJPF_BGR;
-	param->jflags = TJFLAG_FASTDCT;
-
-	/* tool configuration */
-	param->loglevel = LINFO;
-	param->enable_filelog = false;
-	param->test_mode = false;
-	param->server_mode = false;
-
-	return 0;
 }
 
 int tjstream_init_info(struct tiny_jpeg_stream_info *info, void *param)
@@ -432,7 +189,6 @@ int tjstream_init_info(struct tiny_jpeg_stream_info *info, void *param)
 
 int tjstream_info_show(struct tiny_jpeg_stream_info *info)
 {
-
 	fprintf(stdout, "Info:\n");
 	fprintf(stdout, "  fb: %s\n", info->fbname);
 	fprintf(stdout, "  width : %d\n", info->fb_width);
@@ -449,117 +205,12 @@ int tjstream_info_show(struct tiny_jpeg_stream_info *info)
 	return 0;
 
 }
-int utils_get_jfmt(char *string, unsigned int *fmt)
-{
-	printf("%s need implment!\n", __func__);
-	return 0;
-}
-
-int utils_get_loglevel(char *string, int *loglevel)
-{
-	printf("%s need implment!\n", __func__);
-	return 0;
-}
-/*
- *  --fps-max
- *  --fps-min
- *  --frame-sync
- *  --client-mode(default)
- *  --server-mode
- *  --fb-res=widthxheight:bpp
- *  --fb-fmt=(RGB/BGR)
- *  --jpg-res=widthxheight:bpp
- *  --jfmt=RGB/RGB/RGBX...
- *  --test-mode
- *  --test-mode-dir=
- * */
-int tjstream_get_param(int argc, char *argv[], struct tiny_jpeg_stream_param *param)
-{
-	int opt;
-	int port, fps, jflags;
-	char *ip, *log_dir, *loglevel, *jfmt;
-	poptContext optCon;
-	
-	struct poptOption theOptions[] = {
-	{"ip",		'a', POPT_ARG_STRING,	&ip,	'a', "ip address", "a.b.c.d"},
-	{"port",	'p', POPT_ARG_INT,	&port,	'p', "port", "port"},
-	{"fps",		'f', POPT_ARG_INT,	&fps,	'f', "fps", "fps"},
-	{"jfmt",	't', POPT_ARG_STRING,	&jfmt,  't', "jpeg pixel format", "BRG/RGB/BGRX/RGBX"},
-	{"jflags",	'F', POPT_ARG_INT,	&jflags,'F', "hex number override default jpeg jflags", "flags"},
-	{"loglevel",	'l', POPT_ARG_STRING,	&loglevel,	'l', "loglevel", "NONE/ERROR/WARN/INFO/VERBOSE"},
-	{"log-dir",	'd', POPT_ARG_STRING,	&log_dir,	'd', "dir name", "dir"},
-	{"test-mode",	'T', POPT_ARG_NONE,	NULL,	'T', "test mode to check fps perf", ""},
-	POPT_AUTOHELP { NULL, 0, 0, NULL ,0},
-	};
-
-	optCon = poptGetContext(NULL, argc, (const char **)argv, theOptions, 0);
-	poptSetOtherOptionHelp(optCon, "[OPTION...]");
-
-	while ((opt = poptGetNextOpt(optCon)) >= 0) {
-		switch (opt) {
-		case 'a':
-			strncpy(param->ip, ip, sizeof(param->ip) - 1);
-			break;
-		case 'p':
-			param->port = port;
-			break;
-		case 'f':
-			param->fps = fps;
-			break;
-		case 't':
-			utils_get_jfmt(jfmt, &param->jfmt);
-			break;
-		case 'F':
-			param->jflags = jflags;
-			break;
-		case 'l':
-			utils_get_loglevel(loglevel, &param->loglevel);
-			break;
-		case 'd':
-			strncpy(param->log_dir, log_dir, sizeof(param->log_dir) - 1);
-			break;
-		default:
-			break;
-		}
-	};
-	if (opt < -1) {
-		fprintf(stderr, "%s: %s\n",
-			poptBadOption(optCon, POPT_BADOPTION_NOALIAS),
-			poptStrerror(opt));
-		poptFreeContext(optCon);
-		exit(EXIT_FAILURE);
-	}
-	poptFreeContext(optCon);
-	printf("Params:\n");
-	printf("  ip: %s:%d\n", param->ip,param->port);
-	printf("  fps: %d\n", param->fps);
-	printf("  server mode : %s\n", param->server_mode?"true":"false" );
-	printf("  test mode   : %s\n", param->test_mode?  "true":"false" );
-	printf("  loglevel    : %x\n", param->loglevel);
-	printf("  filelog     : %s\n", param->enable_filelog? "true":"false" );
-	printf("  Jpeg params:\n");
-	printf("    pixel format: %x\n", param->jfmt);
-	printf("    decode flags: %x\n", param->jflags);
-	return 0;
-}
-
-int tjs_trigger_exit(int code)
-{
-	printf("%s need implment!\n", __func__);
-	return 0;
-}
-int tjs_wait_for_exit()
-{
-	printf("%s need implment!\n", __func__);
-	return 0;
-}
 
 int tjs_clean_up(struct tiny_jpeg_stream_info *info)
 {
-	printf("%s need implment!\n", __func__);
+	printf(PREFIX"%s need implment!\n", __func__);
 	tjs_fb_deinit(info);
-	if (info->imgBuf) tjFree(info->imgBuf);
-	if (info->jpegBuf) tjFree(info->jpegBuf);
+	tjs_decode_deinit(info);
 	return 0;
 }
 
@@ -576,7 +227,7 @@ int main(int argc, char *argv[])
 	mgr = (struct tiny_jpeg_stream_mgr *)malloc(
 				sizeof(struct tiny_jpeg_stream_mgr));
 	memset((void*)mgr, 0, sizeof(struct tiny_jpeg_stream_mgr));
-	printf(PREFIX"%s mgr: %p!\n", __func__, (void*)mgr);
+	tjs_debug(PREFIX"%s mgr: %p!\n", __func__, (void*)mgr);
 
 	mgr->info.param = tjs_param;
 	tjs_info = &mgr->info;
@@ -599,7 +250,7 @@ int main(int argc, char *argv[])
 
 	tjs_wait_for_exit();
 
-	tjs_net_stop(tjs_param);
+	/* check connection */
 	tjs_clean_up(tjs_info);
 	free(tjs_param);
 	free(mgr);
@@ -609,36 +260,38 @@ int main(int argc, char *argv[])
  *
  *
  ********************************************************/
-int tjs_net_stop_client(char* ip, int port)
+int tjs_net_stop_client(struct tiny_jpeg_stream_mgr *mgr)
 {
-	printf(PREFIX"%s need implment!\n", __func__);
+	struct link_info *linker = &mgr->linfo;
+	struct bufferevent *bev = linker->bev;
 #if 0
 	event_base_free(base);
 	bufferevent_free(bev);
 	event_free(ev);
 #endif
+	mgr->sm = TJSSM_HOST_DISCONNECTED;
+	tjs_stop_connection(mgr);
+
+	//自动关闭套接字和清空缓冲区
+	bufferevent_free(bev);
+
+	struct event *ev = linker->ev_cmd;
+	event_free(ev);
 	return 0;
 }
-int tjs_net_stop(struct tiny_jpeg_stream_param *param)
-{
-	if (param->server_mode) {
-		printf(PREFIX"%s need implment!\n", __func__);
-	} else {
-		tjs_net_stop_client(param->ip, param->port);
-	}
-	return 0;
-}
-int tjs_net_start(struct tiny_jpeg_stream_mgr *mgr)
+
+int tjs_net_stop(struct tiny_jpeg_stream_mgr *mgr)
 {
 	struct tiny_jpeg_stream_param *param = mgr->info.param;
+
 	if (param->server_mode) {
-		printf(PREFIX"%s need implment!\n", __func__);
+		tjs_warn(PREFIX"%s need implment!\n", __func__);
 	} else {
-		printf(PREFIX"%s client start!\n", __func__);
-		tjs_net_start_client(param->ip, param->port, mgr);
+		tjs_net_stop_client(mgr);
 	}
 	return 0;
 }
+
 int tjs_net_start_client(char* ip, int port, struct tiny_jpeg_stream_mgr *mgr)
 {
 	struct link_info *linker = &mgr->linfo;
@@ -672,7 +325,6 @@ int tjs_net_start_client(char* ip, int port, struct tiny_jpeg_stream_mgr *mgr)
 	//// 设置超时时间为 5 秒
 	//struct timeval tv = {5, 0};
 	//bufferevent_set_timeouts(bev, &tv, NULL);
-	printf(PREFIX"%s setcb arg mgr: %p!\n", __func__, (void*)mgr);
 	bufferevent_setcb(bev, bev_read_msg_cb, NULL, bev_cb, (void*) mgr);
 	bufferevent_enable(bev, EV_READ | EV_PERSIST);
 
@@ -681,7 +333,7 @@ int tjs_net_start_client(char* ip, int port, struct tiny_jpeg_stream_mgr *mgr)
 	linker->ev_cmd = ev_cmd;
 
 	event_base_dispatch(base);
-	fprintf(stdout,"finished \n");
+	tjs_warn("finished \n");
 	return 0;
 
 __exit:
@@ -689,8 +341,21 @@ __exit:
 	return ret;
 }
 
-void ev_msg_cb(int fd, short events, void*arg)
+int tjs_net_start(struct tiny_jpeg_stream_mgr *mgr)
 {
+	struct tiny_jpeg_stream_param *param = mgr->info.param;
+	if (param->server_mode) {
+		tjs_warn(PREFIX"%s need implment!\n", __func__);
+	} else {
+		tjs_warn(PREFIX"%s client start!\n", __func__);
+		tjs_net_start_client(param->ip, param->port, mgr);
+	}
+	return 0;
+}
+
+static void ev_msg_cb(int fd, short events, void*arg)
+{
+	struct evbuffer *msgbuffer;
 	char msg[1024];
 	int ret = read(fd, msg, sizeof(msg));
 	if (ret < 0) {
@@ -701,100 +366,58 @@ void ev_msg_cb(int fd, short events, void*arg)
 	struct bufferevent *bev = (struct bufferevent*) arg;
 	// Send input message to server
 	if ( (ret >= 5) && !memcmp(msg,"jexit", 5)) {
-		char msg[]="$JPEG-STREAMING-END$\0";
-		bufferevent_write(bev, msg, strlen(msg));
-		printf(PREFIX"%s: end stream\n", __func__);
+		msgbuffer = tjs_evmsg_pack((struct msg_block *)msg, TJSREQ_STREAMING_END | JMTYPE_REQ, 0);
+		tjs_evmsg_write(bev, msgbuffer, NULL, true);
+		tjs_warn(PREFIX"%s: end stream\n", __func__);
 	}
 }
 
-void bev_read_msg_cb(struct bufferevent *bev, void *arg)
-{
-	printf(PREFIX"%s : mgr? %p \n",__func__, arg);
-	tjs_process_reply(arg);
-}
-
-void bev_cb(struct bufferevent* bev, short event, void *arg)
+static void bev_read_msg_cb(struct bufferevent *bev, void *arg)
 {
 	struct tiny_jpeg_stream_mgr *mgr = (struct tiny_jpeg_stream_mgr *)arg;
-	struct link_info *linker = &mgr->linfo;
-
-	printf(PREFIX"%s arg mgr: %p!\n", __func__, (void*)mgr);
-
-	if (event & BEV_EVENT_EOF) {
-		printf(PREFIX"connection closed\n");
-	} else if (event & BEV_EVENT_ERROR) {
-		printf(PREFIX"some other error\n");
-	} else if (event & BEV_EVENT_CONNECTED) {
-		printf(PREFIX"the client has connected to server\n");
-		if (mgr->sm == TJSSM_HOST_DISCONNECTED) {
-			/* create jpegstream process */
-			mgr->sm = TJSSM_DEVICE_CONNECTED;
-			tjs_start_connection(mgr);
-		} else {
-			/* resume last connection? */
-			printf(PREFIX"stream has established!\n");
-		}
-		return;
-	}
-
-	mgr->sm = TJSSM_HOST_DISCONNECTED;
-	tjs_stop_connection(mgr);
-
-	//自动关闭套接字和清空缓冲区
-	bufferevent_free(bev);
-
-	struct event *ev = linker->ev_cmd;
-	event_free(ev);
+	tjs_net_event_post(mgr, NET_EVENT_RECV);
 }
 
-int tjs_process_reply(struct tiny_jpeg_stream_mgr *mgr)
+static void bev_cb(struct bufferevent* bev, short event, void *arg)
 {
-	unsigned char msg[128];
-	struct bufferevent *bev = mgr->linfo.bev;
-	size_t len = bufferevent_read(bev, msg, sizeof(msg));
+	struct tiny_jpeg_stream_mgr *mgr = (struct tiny_jpeg_stream_mgr *)arg;
 
-	printf(PREFIX"[%d]%s: recv from server\n", mgr->sm, __func__);
-	switch (mgr->sm) {
-	case TJSSM_RESOLUTION_REPORT:
-		printf(PREFIX"[%d]%s: resoltion report reply %s(%d)\n",
-				mgr->sm, __func__, msg, len);
-		tjs_start_stream(mgr);
-		break;
-	case TJSSM_STREAMING_REQ:
-		printf(PREFIX"[%d]%s: stream req reply %s\n", mgr->sm, __func__, msg);
-		mgr->sm = TJSSM_STREAMING;
-		break;
-	case TJSSM_STREAMING:
-		/* read picture bound then send signal*/
-		printf(PREFIX"[%d]%s: stream %s\n", mgr->sm, __func__, msg);
-		break;
-	case TJSSM_STREAMING_END:
-		/* read picture bound then send signal*/
-		break;
-
+	if (event & BEV_EVENT_EOF) {
+		tjs_warn(PREFIX"connection closed\n");
+		tjs_net_event_post(mgr, NET_EVENT_EOF);
+	} else if (event & BEV_EVENT_ERROR) {
+		printf(PREFIX"some other error\n");
+		tjs_net_event_post(mgr, NET_EVENT_ERROR);
+	} else if (event & BEV_EVENT_CONNECTED) {
+		printf(PREFIX"the client has connected to server\n");
+		tjs_net_event_post(mgr, NET_EVENT_CONNECTED);
 	}
-	return 0;
+	return;
 }
 
 int tjs_stop_stream(struct tiny_jpeg_stream_mgr *mgr)
 {
-	struct link_info *linker = &mgr->linfo;
-	char msg[]="$JPEG-STREAMING-END$\0";
+	struct evbuffer *msgbuffer;
+	struct msg_block msg;
 
 	mgr->sm = TJSSM_STREAMING_END;
-	bufferevent_write(linker->bev, msg, strlen(msg));
-	printf(PREFIX"%s: stop stream \n", __func__);
+	msgbuffer = tjs_evmsg_pack(&msg, TJSREQ_STREAMING_END | JMTYPE_REQ, 0);
+	tjs_evmsg_write(mgr->linfo.bev, msgbuffer, NULL, true);
 	pthread_mutex_destroy(&mgr->lock);
+	printf(PREFIX"[%d]%s: stream end req\n", mgr->sm, __func__);
 	return 0;
 }
 
 int tjs_start_stream(struct tiny_jpeg_stream_mgr *mgr)
 {
-	struct link_info *linker = &mgr->linfo;
+	struct evbuffer *msgbuffer;
+	struct msg_block msg;
 
 	pthread_mutex_init(&mgr->lock, NULL);
+	/* mutex init lock state */
+	pthread_mutex_lock(&mgr->lock);
 	int retval = pthread_create(
-			&mgr->ntid, NULL, tjs_process, mgr);
+			&mgr->ntid, NULL, tjs_process_thread, mgr);
 
 	if (retval != 0) {
 		fprintf(stderr, "Error:unable to create thread\n");
@@ -803,11 +426,14 @@ int tjs_start_stream(struct tiny_jpeg_stream_mgr *mgr)
 	printf(PREFIX"%s: Thread created successfully\n", __func__);
 
 	mgr->sm = TJSSM_STREAMING_REQ;
-	char msg[]="$JPEG-STREAMING-REQ$\0";
-	bufferevent_write(linker->bev, msg, strlen(msg));
+	msgbuffer = tjs_evmsg_pack(&msg, TJSREQ_STREAM_START | JMTYPE_REQ, 0);
+	tjs_evmsg_write(mgr->linfo.bev, msgbuffer, NULL, true);
+	mgr->sm = TJSSM_STREAMING;
+
 	printf(PREFIX"[%d]%s: stream req\n", mgr->sm, __func__);
 	return 0;
 }
+
 static int tjs_connect_host(struct tiny_jpeg_stream_mgr *mgr)
 {
 	printf(PREFIX"%s need implment!\n", __func__);
@@ -822,12 +448,21 @@ static int tjs_connect_host(struct tiny_jpeg_stream_mgr *mgr)
  * */
 static int tjs_resolution(struct tiny_jpeg_stream_mgr *mgr)
 {
+#define MSG3		"$1024x600@20fps$\n"
+#define MSG3_SZ		16
 	struct link_info *linker = &mgr->linfo;
-	char msg[]="$JPEG-RESOLUTION-RQ$1024x600@20fps$$\0";
+	struct evbuffer *evmsg, *evbody;
+	struct msg_block msg;
 
 	mgr->sm = TJSSM_RESOLUTION_REPORT;
-	bufferevent_write(linker->bev, msg, strlen(msg));
-	printf(PREFIX"[1]%s: resoltion report\n", __func__);
+
+	evbody = evbuffer_new();
+	evbuffer_add(evbody, MSG3, MSG3_SZ);
+	evmsg = tjs_evmsg_pack(&msg, TJSREQ_RESOLUTION_REPORT | JMTYPE_REQ, MSG3_SZ);
+	tjs_evmsg_write(linker->bev, evmsg, evbody, true);
+
+	printf(PREFIX"[%02x]%s: TJSREQ_RESOLUTION_REPORT(%d)\n",
+			mgr->sm, __func__, TJSSM_RESOLUTION_REPORT);
 	return 0;
 }
 int tjs_stop_connection(struct tiny_jpeg_stream_mgr *mgr)
@@ -841,3 +476,246 @@ int tjs_start_connection(struct tiny_jpeg_stream_mgr *mgr)
 	tjs_resolution(mgr);
 	return 0;
 }
+
+
+static size_t tjs_net_get_input_length(struct bufferevent *bev)
+{
+	struct evbuffer *evbuf = bufferevent_get_input(bev);
+	return evbuffer_get_length(evbuf);
+}
+
+int tjs_msgblk_received(struct tiny_jpeg_stream_mgr *mgr)
+{
+	size_t len = tjs_net_get_input_length(mgr->linfo.bev);
+	struct evbuffer *evbuf = bufferevent_get_input(mgr->linfo.bev);
+	struct msg_block msgblk;
+
+	if (len < MSGLEN) {
+		printf(PREFIX"Not enough data %d\n", len);
+		return 1;
+	}
+
+	/* copy out massage head */
+	evbuffer_copyout(evbuf, &msgblk, sizeof(msgblk));
+	if (ntohl(msgblk.magic) != kMessageHeaderMagic) {
+		evbuffer_drain(evbuf, MSGLEN);
+		printf(PREFIX"%s: magic %x err, drop %d data \n", __func__,
+				ntohl(msgblk.magic), MSGLEN);
+		return -1;
+	}
+	if (len < ntohl(msgblk.len)) {
+		bufferevent_setwatermark(mgr->linfo.bev, EV_READ, ntohl(msgblk.len), 0);
+		printf(PREFIX"%s: read more current %d/%d\n", __func__, len, ntohl(msgblk.len));
+		return len;
+	}
+	bufferevent_setwatermark(mgr->linfo.bev, EV_READ, 0, 0);
+	return 0;
+}
+int tjs_process_input(struct tiny_jpeg_stream_mgr *mgr)
+{
+	unsigned char msg[128];
+	struct bufferevent *bev = mgr->linfo.bev;
+	size_t len;
+	int ret;
+
+	memset(msg, 0, sizeof(msg));
+	tjs_msg(PREFIX"[%d]%s: recv from server\n", mgr->sm, __func__);
+	switch (mgr->sm) {
+	case TJSSM_RESOLUTION_REPORT:
+		len = tjs_net_get_input_length(bev);
+		len = bufferevent_read(bev, msg, len);
+		tjs_msg(PREFIX"[%d]%s: resoltion report reply %s(%d)\n",
+				mgr->sm, __func__, msg, len);
+		tjs_start_stream(mgr);
+		break;
+	case TJSSM_STREAMING_REQ:
+		len = tjs_net_get_input_length(bev);
+		tjs_msg(PREFIX"[%d]%s: stream req reply %d\n", mgr->sm, __func__, len);
+		len = bufferevent_read(bev, msg, len);
+		ret = tjs_check_result(TJSREQ_STREAM_START, msg);
+		if(!ret)
+			mgr->sm = TJSSM_STREAMING;
+		break;
+	case TJSSM_STREAMING:
+		len = tjs_net_get_input_length(bev);
+		tjs_msg(PREFIX"[%d]%s: streaming %d\n", mgr->sm, __func__, len);
+		/* read picture bound then send signal*/
+		ret = tjs_read_frame(mgr, len);
+		if (!ret) {
+			set_image_done(mgr);
+		} else {
+			tjs_msg(PREFIX"[%d]%s: stream in\n", mgr->sm, __func__);
+		}
+		break;
+	case TJSSM_STREAMING_END:
+		len = tjs_net_get_input_length(bev);
+		len = bufferevent_read(bev, msg, len);
+		tjs_msg(PREFIX"[%d]%s: end stream reply %s(%d)\n",
+				mgr->sm, __func__, msg, len);
+		/* read picture bound then send signal*/
+		break;
+	default:
+		len = bufferevent_read(bev, msg, sizeof(msg) - 1);
+		tjs_msg(PREFIX"[%d]%s: unknown reply %s(%d)\n",
+				mgr->sm, __func__, msg, len);
+	}
+	return 0;
+}
+
+int tjs_net_event_post(struct tiny_jpeg_stream_mgr *mgr, int event)
+{
+	switch (event){
+	case NET_EVENT_CONNECTED:
+		if (mgr->sm == TJSSM_HOST_DISCONNECTED) {
+			/* create jpegstream process */
+			mgr->sm = TJSSM_DEVICE_CONNECTED;
+			tjs_start_connection(mgr);
+		} else {
+			/* resume last connection? */
+			printf(PREFIX"stream has established!\n");
+		}
+		break;
+	case NET_EVENT_RECV:
+		if (!tjs_msgblk_received(mgr))
+			tjs_process_input(mgr);
+		break;
+	case NET_EVENT_EOF:
+	case NET_EVENT_ERROR:
+		tjs_net_stop(mgr);
+		break;
+	}
+	return 0;
+}
+int tjs_net_process_input()
+{
+	return 0;
+}
+
+int tjs_check_result(int sm, void  *msg)
+{
+	return 0;
+}
+
+__unused static void*
+search_tag(unsigned char *str, int str_len, unsigned char *tag, int tag_len, char *ending)
+{
+	if ( str == NULL || tag == NULL)
+		return NULL;
+	if ( !str_len || !tag_len || ( str_len < tag_len ))
+		return NULL;
+
+	unsigned char *pt = tag;
+	unsigned char *ps = str;
+
+	str_len = str_len - tag_len;
+	while (str_len--) {
+		if ((pt - tag) == tag_len)
+			return (ps - tag_len);
+		if (*pt != *ps)
+			pt = tag;
+		else
+			pt++;
+		ps++;
+	}
+	return NULL;
+}
+
+void dump_hex(unsigned char *data, int len)
+{
+	unsigned char *p=data;
+	int i= 0;
+	for (i = 0 ; i < len ; i++ , p++) {
+		if (!(i%16))
+			printf("%04x:", (unsigned int)(p - data));
+		printf(" %02x",*p);
+		if( !((i+1)%16))
+			printf("\n");
+	}
+	printf("\n");
+
+}
+int tjs_read_frame(struct tiny_jpeg_stream_mgr *mgr, size_t len)
+{
+	struct bufferevent *bev = mgr->linfo.bev;
+	struct tiny_jpeg_stream_info *info = &mgr->info;
+	struct msg_block *msg;
+	int ret = 0;
+	unsigned long jsize = 0;
+	unsigned char head[MSGLEN];
+	unsigned short type;
+	
+	struct evbuffer *evbuf = bufferevent_get_input(bev);
+	/* copy out massage head */
+	evbuffer_copyout(evbuf, head, sizeof(head));
+	msg = (struct msg_block *)head;
+	if ( ntohl(msg->magic) != kMessageHeaderMagic) {
+		evbuffer_drain(evbuf, MSGLEN);
+		printf(PREFIX"%s: magic %x err, drop %d data \n", __func__,
+				ntohl(msg->magic), MSGLEN);
+		return -1;
+	}
+	type = ntohs(msg->jmtype);
+	if(type != SET_REPLY(TJSREQ_STREAMING)) {
+		printf(PREFIX"%s: type %x err, drop %d data \n", __func__,
+				ntohl(msg->jmtype), MSGLEN);
+		evbuffer_drain(evbuf, MSGLEN);
+		return -2;
+	}
+
+	if (len >= ntohl(msg->len)) {
+		/* copy msg head */
+		evbuffer_remove(evbuf, head, sizeof(head));
+		/* copy to body */
+		jsize = ntohl(msg->len) - MSGLEN;
+		len = evbuffer_remove(evbuf, (unsigned char*)info->jpegBuf, jsize);
+		bufferevent_setwatermark(bev, EV_READ, 0, 0);
+		info->jpegSize = jsize;
+	} else if (len < ntohl(msg->len)) {
+		bufferevent_setwatermark(bev, EV_READ, ntohl(msg->len), 0);
+		printf(PREFIX"%s: read more current %d \n", __func__, len );
+		return len;
+	}
+	tjs_msg(PREFIX"%s read jpeg %d/%ld done !\n", __func__, len, jsize);
+	return ret;
+}
+
+struct evbuffer* tjs_evmsg_pack(
+		struct msg_block *blk,
+		unsigned short type,
+		int payload_len)
+{
+	int len = MSGLEN + payload_len;
+
+	blk->magic = htonl(MAGIC);
+	blk->jmtype = htons(type);
+	blk->len = htonl(len);
+
+	struct evbuffer *output_buffer = evbuffer_new();
+	if (output_buffer == NULL) {
+		return NULL;
+	}
+	evbuffer_add(output_buffer, blk, MSGLEN);
+	return output_buffer;
+}
+
+int tjs_evmsg_write(struct bufferevent *bev,
+		struct evbuffer *evmsg, struct evbuffer *evbody,
+		int cleanup)
+
+{
+	struct evbuffer *output_buffer = bufferevent_get_output(bev);
+
+	evbuffer_add_buffer(output_buffer, evmsg);
+	if (cleanup)
+		evbuffer_free(evmsg);
+	if (evbody){
+		evbuffer_add_buffer(output_buffer, evbody);
+		evbuffer_free(evbody);
+	}
+
+	bufferevent_write_buffer(bev, output_buffer);
+
+	return 0;
+}
+
+

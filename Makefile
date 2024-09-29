@@ -11,13 +11,28 @@ LDFLAGS +=  -lpthread
 
 all: tjstream
 
-tjstream: tjstream.o
+tjstream: tjstream.o jpeg.o fb.o test.o utils.o log.o
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 tjstream.o: tjstream.c
 	$(CC) -c -o $@ $< $(CFLAGS)
 
+jpeg.o: jpeg.c
+	$(CC) -c -o $@ $< $(CFLAGS)
+
+fb.o: fb.c
+	$(CC) -c -o $@ $< $(CFLAGS)
+
+test.o: test.c
+	$(CC) -c -o $@ $< $(CFLAGS)
+
+utils.o: utils.c
+	$(CC) -c -o $@ $< $(CFLAGS)
+
+log.o: log.c
+	$(CC) -c -o $@ $< $(CFLAGS)
+
 clean:
-	rm -f tjstream tjstream.o
+	rm -f tjstream *.o
 
 .PHONY: all clean
